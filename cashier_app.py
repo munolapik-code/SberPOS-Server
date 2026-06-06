@@ -18,7 +18,7 @@ class CashierApp:
         self.root.configure(bg='#f5f5f5')
         
         # Настройки
-        self.base_url = "http://192.168.0.7:5001"
+        self.base_url = "https://sberpos-server.onrender.com"
         self.session = requests.Session()
         self.terminal_id = None
         self.password = None
