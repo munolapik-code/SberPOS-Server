@@ -13,28 +13,6 @@ import threading
 import time
 from datetime import datetime, timedelta
 from io import BytesIO
-from pymongo import MongoClient  # <--- Добавь эту строку
-import os                        # <--- Добавь эту тоже, чтобы работать с переменными среды
-# Инициализация MongoDB
-mongo_uri = os.environ.get('MONGO_URI')
-if mongo_uri:
-    client = MongoClient(mongo_uri)
-    db = client['sberpos_database']  # Имя твоей базы
-    terminals_col = db['terminals']  # Коллекция для терминалов
-    users_col = db['users']          # Коллекция для пользователей
-    print("✅ Подключение к MongoDB установлено")
-else:
-    print("⚠️ Внимание: переменная MONGO_URI не настроена!")
-# Пробуем импортировать psycopg3, если не получается - работаем без БД
-try:
-    import psycopg
-    from psycopg.types.json import Jsonb
-    PSYCOPG_AVAILABLE = True
-    print("✅ psycopg3 загружен успешно")
-except ImportError as e:
-    print(f"⚠️  psycopg не доступен: {e}")
-    print("⚠️  Будет использоваться только файловое хранилище")
-    PSYCOPG_AVAILABLE = False
 
 # Пробуем импортировать qrcode для генерации QR-кодов
 try:
