@@ -833,16 +833,15 @@ def face_upload():
     except Exception as e:
         print(f"❌ [FACE UPLOAD] Error: {e}")
         return jsonify({'error': str(e), 'success': False}), 500
-
 @app.route('/api/payload', methods=['GET', 'POST'])
 @app.route('/admin/set_payload', methods=['POST'])
 def payload_handler():
     if request.method == 'GET':
-        terminal_id = request.args.get('terminal_id')
-        if not terminal_id or terminal_id not in terminals: return jsonify({'error': 'Terminal not found'}), 404
-        last_seen[terminal_id] = datetime.now()
-        curr = terminals[terminal_id].get('current_payload', {'state': 'idle', 'data': {}})
-        return jsonify({'success': True, 'state': curr.get('state', 'idle'), 'data': curr.get('data', {}), 'terminal_id': terminal_id}), 200
+        tid = request.args.get('terminal_id')
+        if not tid or tid not in terminals: return jsonify({'error': 'Terminal not found'}), 404
+        last_seen[tid] = datetime.now()
+        curr = terminals[tid].get('current_payload', {'state': 'idle', 'data': {}})
+        return jsonify({'success': True, 'state': curr.get('state', 'idle'), 'data': curr.get('data', {}), 'terminal_id': tid}), 200
     
     session = get_session(request)
     if not session or not session.get('authenticated'): return jsonify({'error': 'Unauthorized'}), 401
@@ -851,10 +850,10 @@ def payload_handler():
     if not tid or tid not in terminals: return jsonify({'error': 'Terminal not found'}), 404
     
     state = data.get('state', 'idle')
-    if 'data' in data and isinstance(data['data'], dict):
-        amt, cont, btn = data['data'].get('amount', '0'), data['data'].get('content', ''), data['data'].get('buttons', '')
-    else:
-        amt, cont, btn = data.get('amount', '0'), data.get('content', ''), data.get('buttons', '')
+    d = data.get('data') if 'data' in data else data
+    amt = d.get('amount', '0') if isinstance(d, dict) else '0'
+    cont = d.get('content', '') if isinstance(d, dict) else ''
+    btn = d.get('buttons', '') if isinstance(d, dict) else ''
     
     terminals[tid]['current_payload'] = {'state': state, 'data': {'amount': amt, 'content': cont, 'buttons': btn}}
     if state == 'pay':
@@ -891,6 +890,58 @@ def set_device_payload_full(session):
     save_terminals(tid, terminals[tid])
     return jsonify({'success': True}), 200
 
+@app.route('/admin/reset', methods=['POST'])
+@require_auth
+def reset_all(session):
+    for tid in terminals:
+        terminals[tid]['current_payload'] = {'state': 'idle', 'data': {}}
+        save_terminals(tid, terminals[tid])
+    return jsonify({'success': True}), 200
+
+@app.route('/admin/set_face_confirm', methods=['POST'])
+@require_auth
+def set_face_confirm(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['face_confirm_enabled'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/set_bypass_shift_check', methods=['POST'])
+@require_auth
+def set_bypass_shift_check(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['bypass_shift_check'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/set_bypass_card_check', methods=['POST'])
+@require_auth
+def set_bypass_card_check(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['bypass_card_check'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/confirm_card', methods=['POST'])
+@require_auth
+def confirm_card(session):
+    data = request.json
+    tid, approved = data.get('terminal_id'), data.get('approved', True)
+    if tid not in terminals or terminals[tid].get('payment_processed', False): return jsonify({'error': 'Invalid request'}), 400
+    terminals[tid]['payment_processed'] = True
+    terminals[tid]['card_status'] = {'pending': False, 'approved': approved}
+    add_transaction(tid, terminals[tid]['current_payload']['data'].get('amount', '0'), 'card', 'success' if approved else 'failed')
+    save_terminals(tid, terminals[tid])
+    return jsonify({'success': True}), 200
 @app.route('/admin/reset', methods=['POST'])
 @require_auth
 def reset_all(session):
