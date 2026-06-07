@@ -63,11 +63,11 @@ USERS_FILE = 'users_db.json'
 TRANSACTIONS_FILE = 'transactions_db.json'
 BALANCE_HISTORY_FILE = 'balance_history_db.json'
 TERMINAL_TIMEOUT = 10  # секунд без активности для отмены оплаты
-DATABASE_URL = os.environ.get('DATABASE_URL')  # PostgreSQL URL от Render
+#DATABASE_URL = os.environ.get('DATABASE_URL')  # PostgreSQL URL от Render
 
-def get_db_connection():
+def get_db_connection():return None
     """Получить подключение к БД"""
-    if DATABASE_URL and PSYCOPG_AVAILABLE:
+    #if DATABASE_URL and PSYCOPG_AVAILABLE:
         # Render использует postgres://, но psycopg требует postgresql://
         db_url = DATABASE_URL.replace('postgres://', 'postgresql://')
         return psycopg.connect(db_url)
