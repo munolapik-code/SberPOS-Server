@@ -198,7 +198,6 @@ def auto_reset_to_idle(terminal_id, delay=5):
     # Отменяем предыдущий таймер если есть
     if terminal_id in auto_reset_timers:
         auto_reset_timers[terminal_id].cancel()
-    
    def reset():
         if terminal_id in terminals:
             # Обновляем память
