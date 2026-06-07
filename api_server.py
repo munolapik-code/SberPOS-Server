@@ -8,12 +8,20 @@ import json
 import uuid
 import random
 import os 
-
+import firebase_admin
+from firebase_admin import credentials, firestore
 import threading
 import time
 from datetime import datetime, timedelta
 from io import BytesIO
-
+# Инициализация Firebase
+try:
+    cred = credentials.Certificate("serviceAccountKey.json")
+    firebase_admin.initialize_app(cred)
+    db = firestore.client()
+    print("✅ Firebase инициализирован успешно")
+except Exception as e:
+    print(f"❌ Ошибка инициализации Firebase: {e}")
 # Пробуем импортировать qrcode для генерации QR-кодов
 try:
     import qrcode
@@ -34,15 +42,21 @@ def after_request(response):
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
 
-# Хранилище данных в памяти
-sessions = {}  # session_id -> {terminal_id, authenticated, csrf_token}
-terminals = {}  # terminal_id -> {password, current_payload, face_confirm_enabled, owner_id}
-device_states = {}  # terminal_id -> {state, amount, last_update}
-auto_reset_timers = {}  # terminal_id -> timer
-last_seen = {}  # terminal_id -> datetime последнего запроса
-users = {}  # user_id -> {username, password, terminals: [], balance: 0}
-transactions = {}  # terminal_id -> [{timestamp, amount, type, status}]
-balance_history = {}  # user_id -> [{timestamp, amount, type, terminal_id, description}]
+# --- Хранилище данных (теперь загружается из Firebase) ---
+# Мы сохраняем структуру словарей, чтобы остальной код сервера их "понимал"
+sessions = {}  # Сессии остаются в памяти, они временные
+
+# Загружаем терминалы из базы при запуске сервера
+terminals = load_terminals() 
+
+# Остальные данные можно загружать аналогично, если нужно
+# Если транзакций много, их лучше не грузить все сразу, а брать по запросу
+device_states = {}  
+auto_reset_timers = {} 
+last_seen = {} 
+users = {} 
+transactions = {} 
+balance_history = {}
 
 TERMINALS_FILE = os.environ.get('TERMINALS_FILE', '/data/terminals_db.json') if os.path.exists('/data') else 'terminals_db.json'
 USERS_FILE = 'users_db.json'
@@ -185,30 +199,25 @@ def auto_reset_to_idle(terminal_id, delay=5):
     if terminal_id in auto_reset_timers:
         auto_reset_timers[terminal_id].cancel()
     
-    def reset():
+   def reset():
         if terminal_id in terminals:
+            # Обновляем память
             terminals[terminal_id]['current_payload'] = {'state': 'idle', 'data': {}}
-            terminals[terminal_id]['card_status'] = {
-                'pending': True,
-                'approved': False
-            }
-            terminals[terminal_id]['qr_status'] = {
-                'pending': True,
-                'approved': False
-            }
-            terminals[terminal_id]['payment_processed'] = False  # Сбрасываем флаг
+            terminals[terminal_id]['card_status'] = {'pending': True, 'approved': False}
+            terminals[terminal_id]['qr_status'] = {'pending': True, 'approved': False}
+            terminals[terminal_id]['payment_processed'] = False
+            
             device_states[terminal_id] = {
                 'state': 'idle',
                 'amount': '0',
                 'last_update': datetime.now().isoformat()
             }
-            print(f"🔄 [AUTO-RESET] {terminal_id} -> idle (all statuses reset)")
-    
-    timer = threading.Timer(delay, reset)
-    timer.start()
-    auto_reset_timers[terminal_id] = timer
-
-def load_terminals():
+            
+            # --- ДОБАВЛЯЕМ СОХРАНЕНИЕ В FIREBASE ---
+            save_terminals(terminal_id, terminals[terminal_id]) 
+            # ---------------------------------------
+            
+            print(f"🔄 [AUTO-RESET] {terminal_id} -> idle (и сохранено в Firebase)")
     """Загрузка терминалов из БД или файла"""
     global terminals
     
@@ -827,111 +836,114 @@ def face_upload():
         return jsonify({'error': str(e), 'success': False}), 500
 
 @app.route('/api/payload', methods=['GET', 'POST'])
-@app.route('/admin/set_payload', methods=['POST'])  # Алиас для бота
+@app.route('/admin/set_payload', methods=['POST'])
 def payload_handler():
-    """Получить или установить payload для терминала"""
-    
     if request.method == 'GET':
-        # Получение payload - проверка терминала
         terminal_id = request.args.get('terminal_id')
-        uuid_param = request.args.get('uuid')
-        
-        if not terminal_id:
-            return jsonify({'error': 'Missing terminal_id'}), 400
-        
-        if terminal_id not in terminals:
-            return jsonify({'error': 'Terminal not found'}), 404
-        
-        terminal = terminals[terminal_id]
-        
-        # Проверка UUID
-        if uuid_param and terminal.get('uuid') != uuid_param:
-            return jsonify({'error': 'Invalid UUID'}), 403
-        
-        # Обновляем время последней активности
+        if not terminal_id or terminal_id not in terminals: return jsonify({'error': 'Terminal not found'}), 404
         last_seen[terminal_id] = datetime.now()
-        
-        current = terminal.get('current_payload', {'state': 'idle', 'data': {}})
-        
-        response_data = {
-            'success': True,
-            'state': current.get('state', 'idle'),
-            'data': current.get('data', {}),
-            'terminal_id': terminal_id
-        }
-        
-        print(f"📥 [GET PAYLOAD] {terminal_id}: state={current.get('state')} (last_seen updated)")
-        print(f"   Response: {response_data}")
-        
-        return jsonify(response_data), 200
+        curr = terminals[terminal_id].get('current_payload', {'state': 'idle', 'data': {}})
+        return jsonify({'success': True, 'state': curr.get('state', 'idle'), 'data': curr.get('data', {}), 'terminal_id': terminal_id}), 200
     
+    session = get_session(request)
+    if not session or not session.get('authenticated'): return jsonify({'error': 'Unauthorized'}), 401
+    data = request.json
+    tid = data.get('terminal_id') or session.get('terminal_id')
+    if not tid or tid not in terminals: return jsonify({'error': 'Terminal not found'}), 404
+    
+    state = data.get('state', 'idle')
+    if 'data' in data and isinstance(data['data'], dict):
+        amt, cont, btn = data['data'].get('amount', '0'), data['data'].get('content', ''), data['data'].get('buttons', '')
     else:
-        # POST - установка payload (требует авторизации)
-        session = get_session(request)
-        if not session or not session.get('authenticated'):
-            return jsonify({'error': 'Unauthorized'}), 401
-        
-        data = request.json
-        
-        # Поддерживаем terminal_id из JSON (для кабинета) или из сессии (для старых клиентов)
-        terminal_id = data.get('terminal_id') or session.get('terminal_id')
-        
-        if not terminal_id:
-            return jsonify({'error': 'Missing terminal_id'}), 400
-        
-        if terminal_id not in terminals:
-            return jsonify({'error': 'Terminal not found'}), 404
-        
-        state = data.get('state', 'idle')
-        
-        # Поддерживаем два формата:
-        # 1. Старый: {state: 'pay', amount: '100', content: '', buttons: ''}
-        # 2. Новый: {state: 'pay', data: {amount: '100', content: '', buttons: ''}}
-        if 'data' in data and isinstance(data['data'], dict):
-            # Новый формат - данные в объекте data
-            amount = data['data'].get('amount', '0')
-            content = data['data'].get('content', '')
-            buttons = data['data'].get('buttons', '')
-        else:
-            # Старый формат - данные на верхнем уровне
-            amount = data.get('amount', '0')
-            content = data.get('content', '')
-            buttons = data.get('buttons', '')
-        
-        
-        terminals[terminal_id]['current_payload'] = {
-            'state': state,
-            'data': {
-                'amount': amount,
-                'content': content,
-                'buttons': buttons
-            }
-        }
-        
-        # Если начинается оплата, устанавливаем pending=True
-        if state == 'pay':
-            # Генерируем одноразовый пароль для QR-оплаты
-            qr_password = ''.join([str(random.randint(0, 9)) for _ in range(6)])
-            
-            # Обычная логика - требуется подтверждение
-            terminals[terminal_id]['card_status'] = {
-                'pending': True,
-                'approved': False
-            }
-            terminals[terminal_id]['payment_processed'] = False  # Сбрасываем флаг при новой оплате
-            
-            terminals[terminal_id]['qr_password'] = qr_password  # Сохраняем пароль
-            print(f"🔐 [PAYLOAD] Generated QR password for {terminal_id}: {qr_password}")
-        
-        device_states[terminal_id] = {
-            'state': state,
-            'amount': amount,
-            'last_update': datetime.now().isoformat()
-        }
-        
-        print(f"📤 [PAYLOAD] Set for {terminal_id}: state={state}, amount={amount}")
-        
-        return jsonify({'success': True, 'status': 'success'}), 200
+        amt, cont, btn = data.get('amount', '0'), data.get('content', ''), data.get('buttons', '')
+    
+    terminals[tid]['current_payload'] = {'state': state, 'data': {'amount': amt, 'content': cont, 'buttons': btn}}
+    if state == 'pay':
+        terminals[tid]['qr_password'] = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+        terminals[tid]['card_status'] = {'pending': True, 'approved': False}
+        terminals[tid]['payment_processed'] = False
+    
+    device_states[tid] = {'state': state, 'amount': amt, 'last_update': datetime.now().isoformat()}
+    save_terminals(tid, terminals[tid])
+    return jsonify({'success': True, 'status': 'success'}), 200
+
+@app.route('/admin/set_device_payload', methods=['POST'])
+@require_auth
+def set_device_payload(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['current_payload'] = {'state': data.get('payload', 'idle'), 'data': {}}
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/set_device_payload_full', methods=['POST'])
+@require_auth
+def set_device_payload_full(session):
+    data = request.json
+    tid, state, amt = data.get('terminal_id'), data.get('state', 'idle'), data.get('amount', '0')
+    if tid not in terminals: return jsonify({'error': 'Terminal not found'}), 404
+    terminals[tid]['current_payload'] = {'state': state, 'data': {'amount': amt, 'content': '', 'buttons': ''}}
+    if state == 'pay':
+        terminals[tid]['qr_password'] = ''.join([str(random.randint(0, 9)) for _ in range(6)])
+        terminals[tid]['card_status'] = {'pending': True, 'approved': False}
+        terminals[tid]['payment_processed'] = False
+    save_terminals(tid, terminals[tid])
+    return jsonify({'success': True}), 200
+
+@app.route('/admin/reset', methods=['POST'])
+@require_auth
+def reset_all(session):
+    for tid in terminals:
+        terminals[tid]['current_payload'] = {'state': 'idle', 'data': {}}
+        save_terminals(tid, terminals[tid])
+    return jsonify({'success': True}), 200
+
+@app.route('/admin/set_face_confirm', methods=['POST'])
+@require_auth
+def set_face_confirm(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['face_confirm_enabled'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/set_bypass_shift_check', methods=['POST'])
+@require_auth
+def set_bypass_shift_check(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['bypass_shift_check'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/set_bypass_card_check', methods=['POST'])
+@require_auth
+def set_bypass_card_check(session):
+    data = request.json
+    tid = data.get('terminal_id')
+    if tid in terminals:
+        terminals[tid]['bypass_card_check'] = data.get('enabled', False)
+        save_terminals(tid, terminals[tid])
+        return jsonify({'success': True}), 200
+    return jsonify({'error': 'Terminal not found'}), 404
+
+@app.route('/admin/confirm_card', methods=['POST'])
+@require_auth
+def confirm_card(session):
+    data = request.json
+    tid, approved = data.get('terminal_id'), data.get('approved', True)
+    if tid not in terminals or terminals[tid].get('payment_processed', False): return jsonify({'error': 'Invalid request'}), 400
+    terminals[tid]['payment_processed'] = True
+    terminals[tid]['card_status'] = {'pending': False, 'approved': approved}
+    add_transaction(tid, terminals[tid]['current_payload']['data'].get('amount', '0'), 'card', 'success' if approved else 'failed')
+    save_terminals(tid, terminals[tid])
+    return jsonify({'success': True}), 200
 
 @app.route('/admin/set_device_payload', methods=['POST'])
 @require_auth
@@ -3247,11 +3259,35 @@ async function cancelPayment() {
 </script>
 </body></html>'''
     
-    return html
-if __name__ == '__main__':
+    if __name__ == '__main__':
+    # 1. Загружаем данные из Firebase перед запуском сервера
+    print("🔄 Загрузка данных из Firebase...")
+    terminals = load_terminals()
+    
+    # 2. Настройка порта
     port = int(os.environ.get('PORT', 5001))
+    
+    # 3. Вывод статуса
     print(f"🚀 API Server запущен на порту {port}")
     print(f"📌 Загружено терминалов: {len(terminals)}")
-    print("   Регистрация: POST /register")
+    print("   Регистрация: POST /api/register_device")
     print("   Формат: TRM-#### (4 цифры), пароль: 6 цифр")
+    
+    # 4. Запуск приложения
     app.run(host='0.0.0.0', port=port, debug=False)
+def load_terminals():
+    terminals = {}
+    try:
+        docs = db.collection('terminals').stream()
+        for doc in docs:
+            terminals[doc.id] = doc.to_dict()
+    except Exception as e:
+        print(f"Ошибка при чтении из Firebase: {e}")
+    return terminals
+
+def save_terminals(terminal_id, data):
+    try:
+        db.collection('terminals').document(terminal_id).set(data)
+        print(f"✅ Успешно сохранено в Firebase: {terminal_id}")
+    except Exception as e:
+        print(f"❌ Ошибка сохранения в Firebase: {e}")
