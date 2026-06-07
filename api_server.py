@@ -65,7 +65,8 @@ BALANCE_HISTORY_FILE = 'balance_history_db.json'
 TERMINAL_TIMEOUT = 10  # секунд без активности для отмены оплаты
 #DATABASE_URL = os.environ.get('DATABASE_URL')  # PostgreSQL URL от Render
 
-def get_db_connection():return None
+def get_db_connection():
+    return None
     """Получить подключение к БД"""
     #if DATABASE_URL and PSYCOPG_AVAILABLE:
         # Render использует postgres://, но psycopg требует postgresql://
