@@ -197,8 +197,8 @@ def auto_reset_to_idle(terminal_id, delay=5):
     """Автоматически сбросить терминал в idle через delay секунд"""
     # Отменяем предыдущий таймер если есть
     if terminal_id in auto_reset_timers:
-        auto_reset_timers[terminal_id].cancel()
-   def reset():
+ auto_reset_timers[terminal_id].cancel()
+def reset():
         if terminal_id in terminals:
             # Обновляем память
             terminals[terminal_id]['current_payload'] = {'state': 'idle', 'data': {}}
