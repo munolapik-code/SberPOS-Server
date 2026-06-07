@@ -5,3 +5,4 @@ qrcode[pil]==7.4.2
 pymongo[srv]
 firebase-admin
 pyTelegramBotAPI
+fake-useragent
